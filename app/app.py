@@ -1,6 +1,9 @@
 import icalendar
 import requests
-from flask import Flask
+from flask import Flask, request
+import itertools
+
+# This is awful code, don't judge me
 
 application = Flask(__name__)
 
@@ -33,11 +36,7 @@ def merge_descriptions(first_description, second_description):
     merged += second_description_lines[line_idx:]
     return '\n'.join(merged).strip()
 
-def compress_calendar(uid):
-    r = requests.get(f"https://centauro.ugent.be/calendar/ical/{uid}")
-    if r.status_code != 200:
-        raise ValueError("Request failed")
-    c = icalendar.Calendar.from_ical(r.text)
+def compress_calendar(c):
     merged_calendar = icalendar.Calendar()
 
     new_calendar = icalendar.Calendar()
@@ -63,17 +62,50 @@ def compress_calendar(uid):
                 new_calendar.add_component(event)
     return new_calendar
 
-@application.route("/<uid>", strict_slashes=False)
-@application.route("/<uid>/<ignored>", strict_slashes=False)
+@application.route("/oasis/<uid>", strict_slashes=False)
 def convert(uid, ignored=None):
     if uid.isalnum():
         try:
-            compressed = compress_calendar(uid)
+            r = requests.get(f"https://centauro.ugent.be/calendar/ical/{uid}")
+            if r.status_code != 200:
+                raise ValueError("Request failed")
+            c = icalendar.Calendar.from_ical(r.text)
+            compressed = compress_calendar(c)
             return compressed.to_ical()
         except ValueError:
             return 'Calendar does not exist\n'
     else:
         return 'Nein\n'
+
+def combiner_inner(ufora, oasis, ignorelist):
+    result_calendar = icalendar.Calendar()
+    if ufora is None or oasis is None:
+        return result_calendar
+    ufora_cal = icalendar.Calendar.from_ical(requests.get(ufora).text)
+    oasis_cal = icalendar.Calendar.from_ical(requests.get(oasis).text)
+    oasis_cal = compress_calendar(oasis_cal)
+
+    timezone_seen = False
+
+    for event, calendarname in itertools.chain(zip(ufora_cal.subcomponents, itertools.repeat('Ufora')), zip(oasis_cal.subcomponents, itertools.repeat('Oasis'))):
+        if event.name == 'VTIMEZONE' and not timezone_seen:
+            result_calendar.add_component(event)
+            timezone_seen = True
+        elif event.name == 'VEVENT':
+            print(event.get('tzid'))
+            if any((ignore in event.get('location') for ignore in ignorelist)):
+                continue
+            event['description'] = icalendar.prop.vText(event.get('description', '') + f'\n{calendarname}')
+            result_calendar.add_component(event)
+    return result_calendar
+
+
+@application.route("/combiner")
+def combiner():
+    ufora = request.args.get('ufora')
+    oasis = request.args.get('oasis')
+    ignore = [i for i in request.args.get('ignore', '').split(',') if i]
+    return combiner_inner(ufora, oasis, ignore).to_ical()
 
 if __name__ == "__main__":
     application.run(debug=True)
