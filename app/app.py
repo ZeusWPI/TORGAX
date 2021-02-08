@@ -2,6 +2,8 @@ import icalendar
 import requests
 from flask import Flask, request
 import itertools
+import re
+
 
 # This is awful code, don't judge me
 
@@ -37,8 +39,6 @@ def merge_descriptions(first_description, second_description):
     return '\n'.join(merged).strip()
 
 def compress_calendar(c):
-    merged_calendar = icalendar.Calendar()
-
     new_calendar = icalendar.Calendar()
     # mapping from (dtstart, dtend, course) to event
     events = {}
@@ -77,6 +77,14 @@ def convert(uid, ignored=None):
     else:
         return 'Nein\n'
 
+def extract_coursecode(event):
+    m = re.search(r'[A-Z][0-9]{6}', event.get('location'))
+    if not m:
+        m = re.search(r'[A-Z][0-9]{6}', event.get('summary'))
+    if m:
+        return m.group(0)
+    return None
+
 def combiner_inner(ufora, oasis, ignorelist):
     result_calendar = icalendar.Calendar()
     if ufora is None or oasis is None:
@@ -87,16 +95,30 @@ def combiner_inner(ufora, oasis, ignorelist):
 
     timezone_seen = False
 
+    all_events = {}
     for event, calendarname in itertools.chain(zip(ufora_cal.subcomponents, itertools.repeat('Ufora')), zip(oasis_cal.subcomponents, itertools.repeat('Oasis'))):
         if event.name == 'VTIMEZONE' and not timezone_seen:
             result_calendar.add_component(event)
             timezone_seen = True
         elif event.name == 'VEVENT':
-            print(event.get('tzid'))
             if any((ignore in event.get('location') for ignore in ignorelist)):
                 continue
-            event['description'] = icalendar.prop.vText(event.get('description', '') + f'\n{calendarname}')
-            result_calendar.add_component(event)
+            coursecode = extract_coursecode(event)
+            if not coursecode:
+                event['description'] = icalendar.prop.vText(event.get('description', '') + f'\n{calendarname}')
+                result_calendar.add_component(event)
+            else:
+                starttime = event.get('dtstart').dt
+                endtime = event.get('dtend').dt
+                triple = (starttime, endtime, coursecode)
+                if triple in all_events:
+                    merged_description = merge_descriptions(event.get('description', ''), str(all_events[triple].get('description', '')))
+                    all_events[triple]['description'] = icalendar.prop.vText(merged_description)
+                    all_events[triple]['location'] = event.get('location') + str(all_events[triple].get('location'))
+                else:
+                    all_events[triple] = event
+    for event in all_events.values():
+        result_calendar.add_component(event)
     return result_calendar
 
 
